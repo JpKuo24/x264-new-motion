@@ -3,7 +3,7 @@ We tested modern optical flow algorithms that are listed here: http://sintel.is.
 
 Results are evaluated in the Paper: **Using modern motion estimation algorithms in existing video codecs** - *Daniel J. Ringis, Davinder Singh, Francois Pitie, Anil Kokaram. SPIE 2018.*
 
-### Installing
+## Installing
 Install it with FFmpeg (for decoders mainly, though x264 has CLI).
 
 The external motion estimation algorithm is called by x264 as a system call. Doing so gives us a way to use existing code for optical flow reasearch papers without reimplementing it again.

@@ -56,14 +56,14 @@ typedef struct
 } ALIGNED_64( x264_me_t );
 
 #define x264_me_search_ref x264_template(me_search_ref)
-void x264_me_search_ref( x264_t *h, x264_me_t *m, int16_t (*mvc)[2], int i_mvc, int *p_fullpel_thresh );
-#define x264_me_search( h, m, mvc, i_mvc )\
-    x264_me_search_ref( h, m, mvc, i_mvc, NULL )
+void x264_me_search_ref( x264_t *h, x264_me_t *m, int16_t (*mvc)[2], int i_mvc, int *p_fullpel_thresh, int i_xyoff );
+#define x264_me_search( h, m, mvc, i_mvc, i_xyoff )\
+    x264_me_search_ref( h, m, mvc, i_mvc, NULL, i_xyoff )
 
 #define x264_me_refine_qpel x264_template(me_refine_qpel)
-void x264_me_refine_qpel( x264_t *h, x264_me_t *m );
+void x264_me_refine_qpel( x264_t *h, x264_me_t *m, int i_xyoff );
 #define x264_me_refine_qpel_refdupe x264_template(me_refine_qpel_refdupe)
-void x264_me_refine_qpel_refdupe( x264_t *h, x264_me_t *m, int *p_halfpel_thresh );
+void x264_me_refine_qpel_refdupe( x264_t *h, x264_me_t *m, int *p_halfpel_thresh, int i_xyoff );
 #define x264_me_refine_qpel_rd x264_template(me_refine_qpel_rd)
 void x264_me_refine_qpel_rd( x264_t *h, x264_me_t *m, int i_lambda2, int i4, int i_list );
 #define x264_me_refine_bidir_rd x264_template(me_refine_bidir_rd)

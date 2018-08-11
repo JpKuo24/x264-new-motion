@@ -6,6 +6,10 @@
  * Authors: Loren Merritt <lorenm@u.washington.edu>
  *          Laurent Aimar <fenrir@via.ecp.fr>
  *          Fiona Glaser <fiona@x264.com>
+ *          Davinder Singh <ds.mudhar@gmail.com>: import external mvs
+ *          (pre-generated-flow-files, opencv's optical flow, deepflow or any
+ *          other algo to generate flow files using motion compensated
+ *          reference frames)
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -28,6 +32,293 @@
 #include "common/common.h"
 #include "macroblock.h"
 #include "me.h"
+#include "unistd.h"
+
+/*
+ * this stuff should be in moved in context struct,
+ * to support multithreading.
+ */
+static const char *external_me_bin_path = "/tmp/me";
+static int frame_num = 0; //frame number for which flow file has been imported
+static float flo_mvs[4320][7680][2] = { 0 };
+static const char *flow_files_dir = "/home/dsm/temp_flo/frame_%04d.flo";
+static char *use_orig_mvs_file = "/tmp/use_orig_mvs";
+
+static char *mvs_decision_method_file = "/tmp/mvs_decision_method";
+static char mvs_decision_method[100] = {0}; // force, hybrid
+
+static char *mvs_calc_strategy_file = "/tmp/mvs_calc_strategy";
+static char mvs_calc_strategy[100] = {0}; // "mean", "median", "best_mv", "none"
+
+static char *external_me_type_file = "/tmp/external_me_type";
+static char external_me_type[100] = {0}; // no-export, raw, png (no-export: don't export motion compensated ref frames, png: export raw frames and convert them to pngs for any algo that requires pngs inputs; raw: only raw pxs, opencv can use raw frames as i added support for optimizations)
+static int external_me_type_no_export;
+static int external_me_type_png;
+static int external_me_type_raw;
+
+static int use_orig_mvs = -1;
+
+#define TEMP_DIR_FRAME_BIN_PNGS "/home/dsm/" //needs end dir seperator. used for storing raw exported frames to external ME.
+
+#define UNKNOWN_FLOW_THRESH 1e9 // flow component is greater, it's considered unknown
+#define TAG_FLOAT 202021.25
+
+static void initialize_env() {
+    if (use_orig_mvs == -1)
+        use_orig_mvs = access( use_orig_mvs_file, F_OK ) != -1;
+
+    if (use_orig_mvs) {
+        return;
+    }
+
+    int n;
+    char *buffer = NULL;
+    size_t bufsize = 1024; //max line size
+    buffer = malloc(bufsize * sizeof(char));
+
+    if (mvs_calc_strategy[0] == 0) {
+        FILE *file = fopen(mvs_calc_strategy_file, "r");
+        if (file && (n = getline(&buffer, &bufsize, file)) > 0) {
+            if (buffer[n-1] == '\n')
+                buffer[n-1] = '\0';
+
+            strcpy(mvs_calc_strategy, buffer);
+            fprintf(stderr, "Motion vectors downscaling method: %s\n", mvs_calc_strategy);
+            fclose(file);
+        } else {
+            fprintf(stderr, "failed to read mvs_calc_strategy_file\n");
+            strcpy(mvs_calc_strategy, "none");
+        }
+    }
+
+    if (mvs_decision_method[0] == 0) {
+        FILE *file = fopen(mvs_decision_method_file, "r");
+        if (file && (n = getline(&buffer, &bufsize, file)) > 0) {
+            if (buffer[n-1] == '\n')
+                buffer[n-1] = '\0';
+
+            strcpy(mvs_decision_method, buffer);
+            fprintf(stderr, "Motion vectors decision method: %s\n", mvs_decision_method);
+            fclose(file);
+        } else {
+            fprintf(stderr, "failed to read mvs_decision_method_file\n");
+            strcpy(mvs_decision_method, "none");
+        }
+    }
+
+    if (external_me_type[0] == 0) {
+        FILE *file = fopen(external_me_type_file, "r");
+        if (file && (n = getline(&buffer, &bufsize, file)) > 0) {
+            if (buffer[n-1] == '\n')
+                buffer[n-1] = '\0';
+
+            strcpy(external_me_type, buffer);
+            fprintf(stderr, "External motion estimator type: %s\n", external_me_type);
+            fclose(file);
+
+            external_me_type_no_export = (strcmp(external_me_type, "no-export") == 0);
+            external_me_type_png = (strcmp(external_me_type, "png") == 0);
+            external_me_type_raw = (strcmp(external_me_type, "raw") == 0);
+
+        } else {
+            fprintf(stderr, "failed to read external_me_type_file\n");
+            strcpy(external_me_type, "none");
+            assert(0);
+        }
+    }
+
+    if (buffer)
+        free(buffer);
+}
+
+// return whether flow vector is unknown
+static int unknown_flow(float u, float v) {
+    return  fabs(u) > UNKNOWN_FLOW_THRESH ||
+            fabs(v) > UNKNOWN_FLOW_THRESH ||
+            isnan(u) || isnan(v);
+}
+
+static void read_flow_file(const char* filename) {
+
+    FILE *stream = NULL;
+    const int n_bands = 2;
+    int width, height;
+    float tag;
+
+    if (filename == NULL) {
+        fprintf(stderr, "read_flow_file: empty filename\n");
+        goto read_flow_file_fail;
+    }
+
+    char *dot = strrchr(filename, '.');
+    if (strcmp(dot, ".flo") != 0) {
+        fprintf(stderr, "read_flow_file (%s): extension .flo expected\n", filename);
+        goto read_flow_file_fail;
+    }
+
+    if ((stream = fopen(filename, "rb")) == NULL) {
+        fprintf(stderr, "read_flow_file: could not open %s\n", filename);
+        goto read_flow_file_fail;
+    }
+
+    if ((int) fread(&tag,    sizeof(float), 1, stream) != 1 ||
+        (int) fread(&width,  sizeof(int),   1, stream) != 1 ||
+        (int) fread(&height, sizeof(int),   1, stream) != 1) {
+        fprintf(stderr, "read_flow_file: problem reading file %s\n", filename);
+        goto read_flow_file_fail;
+    }
+
+    if (tag != TAG_FLOAT) { // simple test for correct endian-ness
+        fprintf(stderr, "read_flow_file(%s): wrong tag (possibly due to big-endian machine?)\n", filename);
+        goto read_flow_file_fail;
+    }
+
+    // another sanity check to see that integers were read correctly (99999 should do the trick...)
+    if (width < 1 || width > 99999) {
+        fprintf(stderr, "read_flow_file(%s): illegal width %d\n", filename, width);
+        goto read_flow_file_fail;
+    }
+
+    if (height < 1 || height > 99999) {
+        fprintf(stderr, "read_flow_file(%s): illegal height %d\n", filename, height);
+        goto read_flow_file_fail;
+    }
+
+    // printf("reading %d x %d x 2 = %d floats\n", width, height, width * height * n_bands);
+    int n = n_bands * width;
+    for (int y = 0; y < height; y++) {
+        float* ptr = &flo_mvs[y][0][0];
+        if ((int) fread(ptr, sizeof(float), n, stream) != n) {
+            fprintf(stderr, "read_flow_file(%s): file is too short\n", filename);
+            goto read_flow_file_fail;
+        }
+    }
+
+    if (fgetc(stream) != EOF) {
+        fprintf(stderr, "read_flow_file(%s): file is too long\n", filename);
+        goto read_flow_file_fail;
+    }
+
+    fclose(stream);
+    return;
+
+read_flow_file_fail:
+
+    if (stream)
+        fclose(stream);
+
+    assert(0);
+}
+
+static void calc_median(x264_t *h, int x, int y, int mb_w, int mb_h, int qpel, int mvs[][2], int *mvs_no) {
+    float mv_x_min = 0, mv_y_min = 0;
+    float min_cost = ULONG_MAX;
+
+    for (int y2 = y; y2 < x264_clip3(y + mb_h, 0, h->mb.i_mb_height * 16); y2++)
+        for (int x2 = x; x2 < x264_clip3(x + mb_w, 0, h->mb.i_mb_width * 16); x2++) {
+
+            if (unknown_flow(flo_mvs[y2][x2][0], flo_mvs[y2][x2][1])) {
+                printf("unknown flow\n"); assert(0);
+            }
+
+            float cost = 0;
+            float mv_x2 = flo_mvs[y2][x2][0] * (qpel ? 4 : 1);
+            float mv_y2 = flo_mvs[y2][x2][1] * (qpel ? 4 : 1);
+
+            for (int y1 = y; y1 < x264_clip3(y + mb_h, 0, h->mb.i_mb_height * 16); y1++)
+                for (int x1 = x; x1 < x264_clip3(x + mb_w, 0, h->mb.i_mb_width * 16); x1++) {
+                    if (unknown_flow(flo_mvs[y1][x1][0], flo_mvs[y1][x1][1])) {
+                        printf("unknown flow\n"); assert(0);
+                    }
+
+                    float mv_x1 = flo_mvs[y1][x1][0] * (qpel ? 4 : 1);
+                    float mv_y1 = flo_mvs[y1][x1][1] * (qpel ? 4 : 1);
+
+                    if (x1 == x2 && y1 == y2)
+                        continue;
+
+                    cost += sqrt((mv_x1-mv_x2)*(mv_x1-mv_x2) + (mv_y1-mv_y2)*(mv_y1-mv_y2));
+                }
+
+            if (min_cost > cost) {
+                min_cost = cost;
+                mv_x_min = mv_x2;
+                mv_y_min = mv_y2;
+            }
+        }
+
+    mvs[0][0] = -round(mv_x_min);
+    mvs[0][1] = -round(mv_y_min);
+
+    *mvs_no = 1;
+}
+
+static void calc_mean(x264_t *h, int x, int y, int mb_w, int mb_h, int qpel, int mvs[][2], int *mvs_no) {
+    float mv_x1 = 0, mv_y1 = 0;
+    for (int j = y; j < x264_clip3(y + mb_h, 0, h->mb.i_mb_height * 16); j++)
+        for (int i = x; i < x264_clip3(x + mb_w, 0, h->mb.i_mb_width * 16); i++) {
+            if (unknown_flow(flo_mvs[j][i][0], flo_mvs[j][i][1])) {
+                printf("unknown flow\n"); assert(0);
+            }
+
+            mv_x1 += flo_mvs[j][i][0] * (qpel ? 4 : 1);
+            mv_y1 += flo_mvs[j][i][1] * (qpel ? 4 : 1);
+        }
+
+    mv_x1 = mv_x1 / (mb_w * mb_h);
+    mv_y1 = mv_y1 / (mb_w * mb_h);
+
+    mvs[0][0] = -round(mv_x1);
+    mvs[0][1] = -round(mv_y1);
+
+    *mvs_no = 1;
+}
+
+static void calc_bestmv(x264_t *h, int x, int y, int mb_w, int mb_h, int qpel, int mvs[][2], int *mvs_no) {
+    int k = 0;
+    for (int j = y; j < x264_clip3(y + mb_h, 0, h->mb.i_mb_height * 16); j++)
+        for (int i = x; i < x264_clip3(x + mb_w, 0, h->mb.i_mb_width * 16); i++) {
+            if (unknown_flow(flo_mvs[j][i][0], flo_mvs[j][i][1])) {
+                printf("unknown flow\n"); assert(0);
+            }
+
+            int mv_x = -round(flo_mvs[j][i][0] * (qpel ? 4 : 1));
+            int mv_y = -round(flo_mvs[j][i][1] * (qpel ? 4 : 1));
+
+            mvs[k][0] = mv_x;
+            mvs[k][1] = mv_y;
+            k++;
+        }
+
+    *mvs_no = k;
+}
+
+static int import_mv(x264_t *h, int mb_x, int mb_y, int mb_w, int mb_h, int sub_mb, int qpel, int mvs[][2], int *mvs_no) {
+    if (sub_mb == 51173) //intra coded, return
+        return 0;
+
+    /* sub_mb = 1-4 Z shaped */
+    int x = mb_x * 16 + ((mb_w != 16 || mb_h != 16) && mb_w < 16 && (sub_mb-1) & 1 ? mb_w : 0);
+    int y = mb_y * 16 + ((mb_w != 16 || mb_h != 16) && mb_h < 16 && (sub_mb-1) >> 1 ? mb_h : 0);
+
+    // if (!(mb_w == 16 && mb_h == 16) && !(mb_w == 8 && mb_h == 8)) printf("mb: %d, %d, xy: %d, %d, mb_wxh: (%d x %d)\n", mb_x, mb_y, x, y, mb_w, mb_h);
+    assert(mb_w != 4); assert(mb_h != 4);
+    if (!(sub_mb == -1616 || sub_mb == 51173 || (sub_mb >= 0 && sub_mb <= 8))) printf("sub_mb: %d\n", sub_mb);
+    assert(sub_mb == -1616 || sub_mb == 51173 || (sub_mb >= 0 && sub_mb <= 8));
+
+    if (strcmp(mvs_calc_strategy, "mean") == 0)
+        calc_mean(h, x, y, mb_w, mb_h, qpel, mvs, mvs_no);
+    else if (strcmp(mvs_calc_strategy, "median") == 0)
+        calc_median(h, x, y, mb_w, mb_h, qpel, mvs, mvs_no);
+    else if (strcmp(mvs_calc_strategy, "best-mv") == 0)
+        calc_bestmv(h, x, y, mb_w, mb_h, qpel, mvs, mvs_no);
+    else {
+        fprintf(stderr, "the mvs_calc_strategy is none: %s\n", mvs_calc_strategy);
+        assert(0);
+    }
+
+    return 1;
+}
 
 /* presets selected from good points on the speed-vs-quality curve of several test videos
  * subpel_iters[i_subpel_refine] = { refine_hpel, refine_qpel, me_hpel, me_qpel }
@@ -55,7 +346,7 @@ static const uint8_t mod6m1[8] = {5,0,1,2,3,4,5,0};
 static const int8_t hex2[8][2] = {{-1,-2}, {-2,0}, {-1,2}, {1,2}, {2,0}, {1,-2}, {-1,-2}, {-2,0}};
 static const int8_t square1[9][2] = {{0,0}, {0,-1}, {0,1}, {-1,0}, {1,0}, {-1,-1}, {-1,1}, {1,-1}, {1,1}};
 
-static void refine_subpel( x264_t *h, x264_me_t *m, int hpel_iters, int qpel_iters, int *p_halfpel_thresh, int b_refine_qpel );
+static void refine_subpel( x264_t *h, x264_me_t *m, int hpel_iters, int qpel_iters, int *p_halfpel_thresh, int b_refine_qpel, int i_xyoff );
 
 #define BITS_MVD( mx, my )\
     (p_cost_mvx[(mx)<<2] + p_cost_mvy[(my)<<2])
@@ -89,6 +380,21 @@ do\
     (costs)[0] += BITS_MVD( bmx+(m0x), bmy+(m0y) );\
     (costs)[1] += BITS_MVD( bmx+(m1x), bmy+(m1y) );\
     (costs)[2] += BITS_MVD( bmx+(m2x), bmy+(m2y) );\
+}
+
+#define COST_MV_X4_DIR_2DS( m0x, m0y, m1x, m1y, m2x, m2y, m3x, m3y, costs )\
+{\
+    pixel *pix_base = p_fref_w + mv_x + mv_y*stride;\
+    h->pixf.fpelcmp_x4[i_pixel]( p_fenc,\
+        pix_base + (m0x) + (m0y)*stride,\
+        pix_base + (m1x) + (m1y)*stride,\
+        pix_base + (m2x) + (m2y)*stride,\
+        pix_base + (m3x) + (m3y)*stride,\
+        stride, costs );\
+    (costs)[0] += BITS_MVD( mv_x+(m0x), mv_y+(m0y) );\
+    (costs)[1] += BITS_MVD( mv_x+(m1x), mv_y+(m1y) );\
+    (costs)[2] += BITS_MVD( mv_x+(m2x), mv_y+(m2y) );\
+    (costs)[3] += BITS_MVD( mv_x+(m3x), mv_y+(m3y) );\
 }
 
 #define COST_MV_X4_DIR( m0x, m0y, m1x, m1y, m2x, m2y, m3x, m3y, costs )\
@@ -179,7 +485,7 @@ do\
 #define SPEL(mv) ((mv)<<2)     /* ... and the reverse. */
 #define SPELx2(mv) (SPEL(mv)&0xFFFCFFFC) /* for two packed MVs */
 
-void x264_me_search_ref( x264_t *h, x264_me_t *m, int16_t (*mvc)[2], int i_mvc, int *p_halfpel_thresh )
+void x264_me_search_ref( x264_t *h, x264_me_t *m, int16_t (*mvc)[2], int i_mvc, int *p_halfpel_thresh, int i_xyoff )
 {
     const int bw = x264_pixel_size[m->i_pixel].w;
     const int bh = x264_pixel_size[m->i_pixel].h;
@@ -771,6 +1077,86 @@ void x264_me_search_ref( x264_t *h, x264_me_t *m, int16_t (*mvc)[2], int i_mvc, 
         break;
     }
 
+    initialize_env();
+
+    if (!use_orig_mvs && h->i_frame_num > 1) { //TODO ignore for intra frames
+
+        if (h->i_frame_num > 1 && frame_num != h->i_frame_num) {
+
+            if (external_me_type_png || external_me_type_raw) {
+                int height = 16 * h->mb.i_mb_height;
+
+                const char *frame_ref_bin = TEMP_DIR_FRAME_BIN_PNGS "frame_ref.bin";
+                const char *frame_enc_bin = TEMP_DIR_FRAME_BIN_PNGS "frame_enc.bin";
+                const char *frame_flow_flo = TEMP_DIR_FRAME_BIN_PNGS "flow.flo";
+                FILE *w_frame = fopen(frame_ref_bin, "w");
+                assert (w_frame);
+                assert (sizeof(pixel) == sizeof(uint8_t)); //assert it's not 10bit video
+                fwrite(p_fref_w, height * stride, sizeof(uint8_t), w_frame);
+                fclose(w_frame);
+
+                //write current frame:
+                w_frame = fopen(frame_enc_bin, "w");
+                assert (w_frame);
+                assert (sizeof(pixel) == sizeof(uint8_t)); //assert it's not 10bit video
+                fwrite(h->mb.pic.p_fenc_plane[0], height * stride, sizeof(uint8_t), w_frame);
+                fclose(w_frame);
+
+                //generate flow file
+                char command[1024];
+                if (external_me_type_png) {
+                    const char *frame_ref_png = TEMP_DIR_FRAME_BIN_PNGS "frame_ref.png";
+                    const char *frame_enc_png = TEMP_DIR_FRAME_BIN_PNGS "frame_enc.png";
+
+                    sprintf(command, TEMP_DIR_FRAME_BIN_PNGS "frame-bin-to-png %s %s %d %d", frame_ref_bin, frame_ref_png, stride, height);
+                    assert( system(command) == 0 );
+                    sprintf(command, TEMP_DIR_FRAME_BIN_PNGS "frame-bin-to-png %s %s %d %d", frame_enc_bin, frame_enc_png, stride, height);
+                    assert( system(command) == 0 );
+
+                    sprintf(command, "%s %s %s %s", external_me_bin_path, frame_ref_png, frame_enc_png, frame_flow_flo); //deepFlow/any which requires png inputs
+                    //sprintf(command, "%s %s %s %s", external_me_bin_path, frame_ref_png, frame_enc_png, frame_flow_flo); //for debugging: opencv png: checking if bin to png is perfectly identical as using raw directly.
+                } else if (external_me_type_raw) {
+                    sprintf(command, "%s %s %s %s %d %d", external_me_bin_path, frame_ref_bin, frame_enc_bin, frame_flow_flo, stride, height); //opencv
+                }
+
+                int retry = 0;
+                const int max_retries = 1;
+                while (retry < max_retries && system(command)) { //hack, something wrong with opencv code. sometimes give segmentaion fault, it works fine with gdb.
+                    retry++;
+                    if (retry == max_retries) {
+                        fprintf(stderr, "tried %d times, got error on system(command)\n", max_retries);
+                        assert(0);
+                    }
+                }
+
+                read_flow_file(frame_flow_flo);
+
+            } else if (external_me_type_no_export) {
+
+                char filename[100];
+                sprintf(filename, flow_files_dir, h->i_frame_num - 1); //note the offset
+                read_flow_file(filename);
+
+            } else {
+                fprintf(stderr, "invalid external_me_type\n");
+                assert(0);
+            }
+
+            frame_num = h->i_frame_num;
+        }
+
+        int mvs[256][2] = { 0 };
+        int mvs_no = 0;
+        if (import_mv(h, h->mb.i_mb_x, h->mb.i_mb_y, bw, bh, i_xyoff, 0, mvs, &mvs_no)) {
+
+            if (strcmp(mvs_decision_method, "force") == 0)
+                bcost = COST_MAX;
+
+            for (int k = 0; k < mvs_no; k++)
+                COST_MV( mvs[k][0], mvs[k][1] );
+        }
+    }
+
     /* -> qpel mv */
     uint32_t bmv = pack16to32_mask(bmx,bmy);
     uint32_t bmv_spel = SPELx2(bmv);
@@ -793,12 +1179,12 @@ void x264_me_search_ref( x264_t *h, x264_me_t *m, int16_t (*mvc)[2], int i_mvc, 
     {
         int hpel = subpel_iterations[h->mb.i_subpel_refine][2];
         int qpel = subpel_iterations[h->mb.i_subpel_refine][3];
-        refine_subpel( h, m, hpel, qpel, p_halfpel_thresh, 0 );
+        refine_subpel( h, m, hpel, qpel, p_halfpel_thresh, 0, i_xyoff );
     }
 }
 #undef COST_MV
 
-void x264_me_refine_qpel( x264_t *h, x264_me_t *m )
+void x264_me_refine_qpel( x264_t *h, x264_me_t *m, int i_xyoff )
 {
     int hpel = subpel_iterations[h->mb.i_subpel_refine][0];
     int qpel = subpel_iterations[h->mb.i_subpel_refine][1];
@@ -806,12 +1192,12 @@ void x264_me_refine_qpel( x264_t *h, x264_me_t *m )
     if( m->i_pixel <= PIXEL_8x8 )
         m->cost -= m->i_ref_cost;
 
-    refine_subpel( h, m, hpel, qpel, NULL, 1 );
+    refine_subpel( h, m, hpel, qpel, NULL, 1, i_xyoff );
 }
 
-void x264_me_refine_qpel_refdupe( x264_t *h, x264_me_t *m, int *p_halfpel_thresh )
+void x264_me_refine_qpel_refdupe( x264_t *h, x264_me_t *m, int *p_halfpel_thresh, int i_xyoff )
 {
-    refine_subpel( h, m, 0, X264_MIN( 2, subpel_iterations[h->mb.i_subpel_refine][3] ), p_halfpel_thresh, 0 );
+    refine_subpel( h, m, 0, X264_MIN( 2, subpel_iterations[h->mb.i_subpel_refine][3] ), p_halfpel_thresh, 0, i_xyoff );
 }
 
 #define COST_MV_SAD( mx, my ) \
@@ -862,7 +1248,7 @@ if( b_refine_qpel || (dir^1) != odir ) \
     COPY4_IF_LT( bcost, cost, bmx, mx, bmy, my, bdir, dir ); \
 }
 
-static void refine_subpel( x264_t *h, x264_me_t *m, int hpel_iters, int qpel_iters, int *p_halfpel_thresh, int b_refine_qpel )
+static void refine_subpel( x264_t *h, x264_me_t *m, int hpel_iters, int qpel_iters, int *p_halfpel_thresh, int b_refine_qpel, int i_xyoff )
 {
     const int bw = x264_pixel_size[m->i_pixel].w;
     const int bh = x264_pixel_size[m->i_pixel].h;
@@ -937,6 +1323,7 @@ static void refine_subpel( x264_t *h, x264_me_t *m, int hpel_iters, int qpel_ite
             m->mv[0] = bmx;
             m->mv[1] = bmy;
             // don't need cost_mv
+            printf("me early termination assert failed\n"); assert(0);
             return;
         }
         else if( bcost < *p_halfpel_thresh )
@@ -959,6 +1346,7 @@ static void refine_subpel( x264_t *h, x264_me_t *m, int hpel_iters, int qpel_ite
             COST_MV_SATD( omx + 1, omy, 3 );
             if( (bmx == omx) & (bmy == omy) )
                 break;
+            assert(0);
         }
     }
     /* Special simplified case for subme=1 */
@@ -983,6 +1371,32 @@ static void refine_subpel( x264_t *h, x264_me_t *m, int hpel_iters, int qpel_ite
         bmx -= (bcost<<28)>>30;
         bmy -= (bcost<<30)>>30;
         bcost >>= 4;
+    }
+
+    //if (bcost_orig != bcost) printf("cost: before: %d, after: %d, mv: before: (%d, %d), after: (%d, %d), bcost(%d vs %d)\n", bcost_orig, bcost, m->mv[0], m->mv[1], bmx, bmy, bcost, temp_cost);
+    initialize_env();
+
+    //printf("(x, y): (%d, %d), mv: (%d, %d), type: %d\n", h->mb.i_mb_x, h->mb.i_mb_y, bmx, bmy, h->mb.i_type);
+
+    if (!use_orig_mvs) {
+        int mvs[256][2] = {0}; int mvs_no = 0;
+
+        if(h->i_frame_num > 1 && h->i_frame_num == frame_num) {
+            if (import_mv(h, h->mb.i_mb_x, h->mb.i_mb_y, bw, bh, i_xyoff, 1, mvs, &mvs_no)) {
+                if (strcmp(mvs_decision_method, "force") == 0)
+                    bcost = COST_MAX;
+
+                for (int k = 0; k < mvs_no; k++)
+                    COST_MV_SAD( mvs[k][0], mvs[k][1] );
+            }
+
+            /*int mv_x = 0, mv_y = 0;
+            if (import_mv(h, h->mb.i_mb_x, h->mb.i_mb_y, &mv_x, &mv_y, bw, bh, i_xyoff, 1)) {
+                //bcost = COST_MAX; // force new mvs
+                COST_MV_SAD( mv_x, mv_y );
+                //COST_MV_SATD( mv_x, mv_y, -1 );
+            }*/
+        }
     }
 
     m->cost = bcost;
@@ -1026,6 +1440,7 @@ int x264_iter_kludge = 0;
 
 static void ALWAYS_INLINE me_refine_bidir( x264_t *h, x264_me_t *m0, x264_me_t *m1, int i_weight, int i8, int i_lambda2, int rd )
 {
+    assert(0);
     int x = i8&1;
     int y = i8>>1;
     int s8 = X264_SCAN8_0 + 2*x + 16*y;
@@ -1179,11 +1594,13 @@ static void ALWAYS_INLINE me_refine_bidir( x264_t *h, x264_me_t *m0, x264_me_t *
 
 void x264_me_refine_bidir_satd( x264_t *h, x264_me_t *m0, x264_me_t *m1, int i_weight )
 {
+    assert(0);
     me_refine_bidir( h, m0, m1, i_weight, 0, 0, 0 );
 }
 
 void x264_me_refine_bidir_rd( x264_t *h, x264_me_t *m0, x264_me_t *m1, int i_weight, int i8, int i_lambda2 )
 {
+    assert(0);
     /* Motion compensation is done as part of bidir_rd; don't repeat
      * it in encoding. */
     h->mb.b_skip_mc = 1;
@@ -1232,6 +1649,7 @@ void x264_me_refine_bidir_rd( x264_t *h, x264_me_t *m0, x264_me_t *m1, int i_wei
 
 void x264_me_refine_qpel_rd( x264_t *h, x264_me_t *m, int i_lambda2, int i4, int i_list )
 {
+    assert(0);
     int16_t *cache_mv = h->mb.cache.mv[i_list][x264_scan8[i4]];
     const uint16_t *p_cost_mvx, *p_cost_mvy;
     const int bw = x264_pixel_size[m->i_pixel].w;

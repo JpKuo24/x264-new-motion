@@ -1264,13 +1264,14 @@ static void mb_analyse_inter_p16x16( x264_t *h, x264_mb_analysis_t *a )
 
         if( h->mb.ref_blind_dupe == i_ref )
         {
+            assert(0);
             CP32( m.mv, a->l0.mvc[0][0] );
-            x264_me_refine_qpel_refdupe( h, &m, p_halfpel_thresh );
+            x264_me_refine_qpel_refdupe( h, &m, p_halfpel_thresh, -1616 );
         }
         else
         {
             x264_mb_predict_mv_ref16x16( h, 0, i_ref, mvc, &i_mvc );
-            x264_me_search_ref( h, &m, mvc, i_mvc, p_halfpel_thresh );
+            x264_me_search_ref( h, &m, mvc, i_mvc, p_halfpel_thresh, -1616 );
         }
 
         /* save mv for predicting neighbors */
@@ -1372,10 +1373,10 @@ static void mb_analyse_inter_p8x8_mixed_ref( x264_t *h, x264_mb_analysis_t *a )
             if( h->mb.ref_blind_dupe == i_ref )
             {
                 CP32( m.mv, a->l0.mvc[0][i+1] );
-                x264_me_refine_qpel_refdupe( h, &m, NULL );
+                x264_me_refine_qpel_refdupe( h, &m, NULL, i+1 );
             }
             else
-                x264_me_search( h, &m, a->l0.mvc[i_ref], i+1 );
+                x264_me_search( h, &m, a->l0.mvc[i_ref], i+1, i+1 );
 
             m.cost += m.i_ref_cost;
 
@@ -1439,7 +1440,7 @@ static void mb_analyse_inter_p8x8( x264_t *h, x264_mb_analysis_t *a )
         LOAD_WPELS( m, h->mb.pic.p_fref_w[i_ref], 0, i_ref, 8*x8, 8*y8 );
 
         x264_mb_predict_mv( h, 0, 4*i, 2, m->mvp );
-        x264_me_search( h, m, mvc, i_mvc );
+        x264_me_search( h, m, mvc, i_mvc, i+1 );
 
         x264_macroblock_cache_mv_ptr( h, 2*x8, 2*y8, 2, 2, 0, m->mv );
 
@@ -1503,10 +1504,10 @@ static void mb_analyse_inter_p16x8( x264_t *h, x264_mb_analysis_t *a, int i_best
             if( h->mb.ref_blind_dupe == i_ref && !ref8[0] )
             {
                 /* We can just leave the MV from the previous ref search. */
-                x264_me_refine_qpel_refdupe( h, &m, NULL );
+                x264_me_refine_qpel_refdupe( h, &m, NULL, i == 0 ? 1 : 3 );
             }
             else
-                x264_me_search( h, &m, mvc, 3 );
+                x264_me_search( h, &m, mvc, 3, i == 0 ? 1 : 3 );
 
             m.cost += m.i_ref_cost;
 
@@ -1568,10 +1569,10 @@ static void mb_analyse_inter_p8x16( x264_t *h, x264_mb_analysis_t *a, int i_best
             if( h->mb.ref_blind_dupe == i_ref && !ref8[0] )
             {
                 /* We can just leave the MV from the previous ref search. */
-                x264_me_refine_qpel_refdupe( h, &m, NULL );
+                x264_me_refine_qpel_refdupe( h, &m, NULL, i+1 );
             }
             else
-                x264_me_search( h, &m, mvc, 3 );
+                x264_me_search( h, &m, mvc, 3, i+1 );
 
             m.cost += m.i_ref_cost;
 
@@ -1693,7 +1694,7 @@ static void mb_analyse_inter_p4x4( x264_t *h, x264_mb_analysis_t *a, int i8x8 )
         LOAD_WPELS( m, h->mb.pic.p_fref_w[i_ref], 0, i_ref, 4*x4, 4*y4 );
 
         x264_mb_predict_mv( h, 0, idx, 1, m->mvp );
-        x264_me_search( h, m, &a->l0.me8x8[i8x8].mv, i_mvc );
+        x264_me_search( h, m, &a->l0.me8x8[i8x8].mv, i_mvc, 10000 );
 
         x264_macroblock_cache_mv_ptr( h, x4, y4, 1, 1, 0, m->mv );
     }
@@ -1732,7 +1733,7 @@ static void mb_analyse_inter_p8x4( x264_t *h, x264_mb_analysis_t *a, int i8x8 )
         LOAD_WPELS( m, h->mb.pic.p_fref_w[i_ref], 0, i_ref, 4*x4, 4*y4 );
 
         x264_mb_predict_mv( h, 0, idx, 2, m->mvp );
-        x264_me_search( h, m, &a->l0.me4x4[i8x8][0].mv, i_mvc );
+        x264_me_search( h, m, &a->l0.me4x4[i8x8][0].mv, i_mvc, 10000 );
 
         x264_macroblock_cache_mv_ptr( h, x4, y4, 2, 1, 0, m->mv );
     }
@@ -1768,7 +1769,7 @@ static void mb_analyse_inter_p4x8( x264_t *h, x264_mb_analysis_t *a, int i8x8 )
         LOAD_WPELS( m, h->mb.pic.p_fref_w[i_ref], 0, i_ref, 4*x4, 4*y4 );
 
         x264_mb_predict_mv( h, 0, idx, 1, m->mvp );
-        x264_me_search( h, m, &a->l0.me4x4[i8x8][0].mv, i_mvc );
+        x264_me_search( h, m, &a->l0.me4x4[i8x8][0].mv, i_mvc, 10000 );
 
         x264_macroblock_cache_mv_ptr( h, x4, y4, 1, 2, 0, m->mv );
     }
@@ -1921,7 +1922,7 @@ static void mb_analyse_inter_b16x16( x264_t *h, x264_mb_analysis_t *a )
             LOAD_HPELS( &m, h->mb.pic.p_fref[l][i_ref], l, i_ref, 0, 0 );
             x264_mb_predict_mv_16x16( h, l, i_ref, m.mvp );
             x264_mb_predict_mv_ref16x16( h, l, i_ref, mvc, &i_mvc );
-            x264_me_search_ref( h, &m, mvc, i_mvc, p_halfpel_thresh[l] );
+            x264_me_search_ref( h, &m, mvc, i_mvc, p_halfpel_thresh[l], -2005 );
 
             /* add ref cost */
             m.cost += m.i_ref_cost;
@@ -2214,7 +2215,7 @@ static void mb_analyse_inter_b8x8_mixed_ref( x264_t *h, x264_mb_analysis_t *a )
 
                 x264_macroblock_cache_ref( h, x8*2, y8*2, 2, 2, l, i_ref );
                 x264_mb_predict_mv( h, l, 4*i, 2, m.mvp );
-                x264_me_search( h, &m, lX->mvc[i_ref], i+1 );
+                x264_me_search( h, &m, lX->mvc[i_ref], i+1, i+1 );
                 m.cost += m.i_ref_cost;
 
                 if( m.cost < lX->me8x8[i].cost )
@@ -2301,7 +2302,7 @@ static void mb_analyse_inter_b8x8( x264_t *h, x264_mb_analysis_t *a )
 
             x264_macroblock_cache_ref( h, x8*2, y8*2, 2, 2, l, lX->me16x16.i_ref );
             x264_mb_predict_mv( h, l, 4*i, 2, m->mvp );
-            x264_me_search( h, m, &lX->me16x16.mv, 1 );
+            x264_me_search( h, m, &lX->me16x16.mv, 1, i+1 );
             a->i_satd8x8[l][i] = m->cost - m->cost_mv;
             m->cost += m->i_ref_cost;
 
@@ -2380,7 +2381,7 @@ static void mb_analyse_inter_b16x8( x264_t *h, x264_mb_analysis_t *a, int i_best
 
                 x264_macroblock_cache_ref( h, 0, 2*i, 4, 2, l, i_ref );
                 x264_mb_predict_mv( h, l, 8*i, 4, m.mvp );
-                x264_me_search( h, &m, mvc, 3 );
+                x264_me_search( h, &m, mvc, 3, i == 0 ? 1 : 3 );
                 m.cost += m.i_ref_cost;
 
                 if( m.cost < lX->me16x8[i].cost )
@@ -2474,7 +2475,7 @@ static void mb_analyse_inter_b8x16( x264_t *h, x264_mb_analysis_t *a, int i_best
 
                 x264_macroblock_cache_ref( h, 2*i, 0, 2, 4, l, i_ref );
                 x264_mb_predict_mv( h, l, 4*i, 2, m.mvp );
-                x264_me_search( h, &m, mvc, 3 );
+                x264_me_search( h, &m, mvc, 3, i+1 );
                 m.cost += m.i_ref_cost;
 
                 if( m.cost < lX->me8x16[i].cost )
@@ -3108,19 +3109,19 @@ skip_analysis:
             }
             else if( i_partition == D_16x16 )
             {
-                x264_me_refine_qpel( h, &analysis.l0.me16x16 );
+                x264_me_refine_qpel( h, &analysis.l0.me16x16, -1616);
                 i_cost = analysis.l0.me16x16.cost;
             }
             else if( i_partition == D_16x8 )
             {
-                x264_me_refine_qpel( h, &analysis.l0.me16x8[0] );
-                x264_me_refine_qpel( h, &analysis.l0.me16x8[1] );
+                x264_me_refine_qpel( h, &analysis.l0.me16x8[0], 1 );
+                x264_me_refine_qpel( h, &analysis.l0.me16x8[1], 3 );
                 i_cost = analysis.l0.me16x8[0].cost + analysis.l0.me16x8[1].cost;
             }
             else if( i_partition == D_8x16 )
             {
-                x264_me_refine_qpel( h, &analysis.l0.me8x16[0] );
-                x264_me_refine_qpel( h, &analysis.l0.me8x16[1] );
+                x264_me_refine_qpel( h, &analysis.l0.me8x16[0], 1 );
+                x264_me_refine_qpel( h, &analysis.l0.me8x16[1], 2 );
                 i_cost = analysis.l0.me8x16[0].cost + analysis.l0.me8x16[1].cost;
             }
             else if( i_partition == D_8x8 )
@@ -3131,27 +3132,27 @@ skip_analysis:
                     switch( h->mb.i_sub_partition[i8x8] )
                     {
                         case D_L0_8x8:
-                            x264_me_refine_qpel( h, &analysis.l0.me8x8[i8x8] );
+                            x264_me_refine_qpel( h, &analysis.l0.me8x8[i8x8], i8x8+1 );
                             i_cost += analysis.l0.me8x8[i8x8].cost;
                             break;
                         case D_L0_8x4:
-                            x264_me_refine_qpel( h, &analysis.l0.me8x4[i8x8][0] );
-                            x264_me_refine_qpel( h, &analysis.l0.me8x4[i8x8][1] );
+                            x264_me_refine_qpel( h, &analysis.l0.me8x4[i8x8][0], -8844 );
+                            x264_me_refine_qpel( h, &analysis.l0.me8x4[i8x8][1], -8844 );
                             i_cost += analysis.l0.me8x4[i8x8][0].cost +
                                       analysis.l0.me8x4[i8x8][1].cost;
                             break;
                         case D_L0_4x8:
-                            x264_me_refine_qpel( h, &analysis.l0.me4x8[i8x8][0] );
-                            x264_me_refine_qpel( h, &analysis.l0.me4x8[i8x8][1] );
+                            x264_me_refine_qpel( h, &analysis.l0.me4x8[i8x8][0], -4488 );
+                            x264_me_refine_qpel( h, &analysis.l0.me4x8[i8x8][1], -4488 );
                             i_cost += analysis.l0.me4x8[i8x8][0].cost +
                                       analysis.l0.me4x8[i8x8][1].cost;
                             break;
 
                         case D_L0_4x4:
-                            x264_me_refine_qpel( h, &analysis.l0.me4x4[i8x8][0] );
-                            x264_me_refine_qpel( h, &analysis.l0.me4x4[i8x8][1] );
-                            x264_me_refine_qpel( h, &analysis.l0.me4x4[i8x8][2] );
-                            x264_me_refine_qpel( h, &analysis.l0.me4x4[i8x8][3] );
+                            x264_me_refine_qpel( h, &analysis.l0.me4x4[i8x8][0], -4444 );
+                            x264_me_refine_qpel( h, &analysis.l0.me4x4[i8x8][1], -4444 );
+                            x264_me_refine_qpel( h, &analysis.l0.me4x4[i8x8][2], -4444 );
+                            x264_me_refine_qpel( h, &analysis.l0.me4x4[i8x8][3], -4444 );
                             i_cost += analysis.l0.me4x4[i8x8][0].cost +
                                       analysis.l0.me4x4[i8x8][1].cost +
                                       analysis.l0.me4x4[i8x8][2].cost +
@@ -3482,20 +3483,20 @@ skip_analysis:
                 analysis.l1.me16x16.cost -= analysis.i_lambda * i_mb_b_cost_table[B_L1_L1];
                 if( i_type == B_L0_L0 )
                 {
-                    x264_me_refine_qpel( h, &analysis.l0.me16x16 );
+                    x264_me_refine_qpel( h, &analysis.l0.me16x16, -1616 );
                     i_cost = analysis.l0.me16x16.cost
                            + analysis.i_lambda * i_mb_b_cost_table[B_L0_L0];
                 }
                 else if( i_type == B_L1_L1 )
                 {
-                    x264_me_refine_qpel( h, &analysis.l1.me16x16 );
+                    x264_me_refine_qpel( h, &analysis.l1.me16x16, -1616 );
                     i_cost = analysis.l1.me16x16.cost
                            + analysis.i_lambda * i_mb_b_cost_table[B_L1_L1];
                 }
                 else if( i_type == B_BI_BI )
                 {
-                    x264_me_refine_qpel( h, &analysis.l0.bi16x16 );
-                    x264_me_refine_qpel( h, &analysis.l1.bi16x16 );
+                    x264_me_refine_qpel( h, &analysis.l0.bi16x16, -1616 );
+                    x264_me_refine_qpel( h, &analysis.l1.bi16x16, -1616 );
                 }
             }
             else if( i_partition == D_16x8 )
@@ -3503,9 +3504,9 @@ skip_analysis:
                 for( int i = 0; i < 2; i++ )
                 {
                     if( analysis.i_mb_partition16x8[i] != D_L1_8x8 )
-                        x264_me_refine_qpel( h, &analysis.l0.me16x8[i] );
+                        x264_me_refine_qpel( h, &analysis.l0.me16x8[i], 1 );
                     if( analysis.i_mb_partition16x8[i] != D_L0_8x8 )
-                        x264_me_refine_qpel( h, &analysis.l1.me16x8[i] );
+                        x264_me_refine_qpel( h, &analysis.l1.me16x8[i], 3 );
                 }
             }
             else if( i_partition == D_8x16 )
@@ -3513,9 +3514,9 @@ skip_analysis:
                 for( int i = 0; i < 2; i++ )
                 {
                     if( analysis.i_mb_partition8x16[i] != D_L1_8x8 )
-                        x264_me_refine_qpel( h, &analysis.l0.me8x16[i] );
+                        x264_me_refine_qpel( h, &analysis.l0.me8x16[i], 1 );
                     if( analysis.i_mb_partition8x16[i] != D_L0_8x8 )
-                        x264_me_refine_qpel( h, &analysis.l1.me8x16[i] );
+                        x264_me_refine_qpel( h, &analysis.l1.me8x16[i], 2 );
                 }
             }
             else if( i_partition == D_8x8 )
@@ -3536,7 +3537,7 @@ skip_analysis:
                         i_part_cost_old = m->cost;
                         i_type_cost = analysis.i_lambda * i_sub_mb_b_cost_table[D_L0_8x8];
                         m->cost -= i_type_cost;
-                        x264_me_refine_qpel( h, m );
+                        x264_me_refine_qpel( h, m, i+1 );
                         if( !b_bidir )
                             analysis.i_cost8x8bi += m->cost + i_type_cost - i_part_cost_old;
                     }
@@ -3546,7 +3547,7 @@ skip_analysis:
                         i_part_cost_old = m->cost;
                         i_type_cost = analysis.i_lambda * i_sub_mb_b_cost_table[D_L1_8x8];
                         m->cost -= i_type_cost;
-                        x264_me_refine_qpel( h, m );
+                        x264_me_refine_qpel( h, m, i+1 );
                         if( !b_bidir )
                             analysis.i_cost8x8bi += m->cost + i_type_cost - i_part_cost_old;
                     }

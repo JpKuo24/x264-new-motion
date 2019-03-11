@@ -5,7 +5,18 @@ Results are evaluated in the Paper: **Using modern motion estimation algorithms 
 
 ## Installing
 Install it with FFmpeg (for decoders mainly, though x264 has CLI).
-
+Make x264 with multi-threading disabled. The modifications doesn't support it:
+```
+./configure --enable-shared --disable-opencl --disable-thread
+make -j4 all
+make install
+```
+Make FFmpeg with x264. This pkg-config may be required:
+```
+./configure --enable-libx264 --enable-gpl
+make -j4 all
+make install
+```
 The external motion estimation algorithm is called by x264 as a system call. Doing so gives us a way to use existing code for optical flow reasearch papers without reimplementing it again.
 
 Compile the external motion estimator, say we wanna use OpenCV's DISFlow:

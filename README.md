@@ -21,7 +21,7 @@ The external motion estimation algorithm is called by x264 as a system call. Doi
 
 Compile the external motion estimator, say we wanna use OpenCV's DISFlow:
 ```
-g++ opencv-motion-estimation.cpp -o ~/opencv-me `pkg-config --libs opencv`
+g++ opencv-motion-estimation.cpp -o ~/opencv-me `pkg-config --libs opencv` `pkg-config --cflags opencv4` --std=c++11
 ```
 Update the binary path in test-suite.sh
 ```
